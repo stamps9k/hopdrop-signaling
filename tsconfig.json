@@ -5,5 +5,5 @@
  *
  */
 {
-  "extends": "./config/tsconfig.json"
+  "extends": "./config/tsconfig.dev.json"
 }

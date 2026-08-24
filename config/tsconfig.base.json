@@ -1,13 +1,11 @@
 {
   "compilerOptions": {
     "target": "ES2022",
+    "types": ["node"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "strict": true,
     "skipLibCheck": true,
-    "noEmitOnError": true,
-    "rootDir": "../src",
-    "outDir": "../dist"
-  },
-  "include": ["../src/**/*"]
+    "noEmitOnError": true
+  }
 }

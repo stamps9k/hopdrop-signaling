@@ -24,8 +24,8 @@
     }
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "tsc -p config/tsconfig.json",
+	  "test": "node --import tsx --test test/**/*.test.mts",
+    "build": "tsc -p config/tsconfig.build.json",
     "dev": "tsx watch src/index.mts",
     "start": "node dist/index.mjs",
     "lint": "eslint . --config config/eslint.config.mjs",
