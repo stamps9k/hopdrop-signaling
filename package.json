@@ -1,0 +1,60 @@
+{
+  "name": "hopdrop-signaling",
+  "version": "0.0.1",
+  "description": "The server backend for hopdrop web app.",
+  "keywords": [
+    "signaling",
+    "file sharing"
+  ],
+  "homepage": "https://github.com/stamps9k/hopdrop-signaling#readme",
+  "bugs": {
+    "url": "https://github.com/stamps9k/hopdrop-signaling/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stamps9k/hopdrop-signaling.git"
+  },
+  "license": "ISC",
+  "author": "James Stamp",
+  "type": "module",
+  "main": "./dist/index.mjs",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs"
+    }
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "tsc -p config/tsconfig.json",
+    "dev": "tsx watch src/index.mts",
+    "start": "node dist/index.mjs",
+    "lint": "eslint . --config config/eslint.config.mjs",
+    "format:check": "prettier --check . --config config/.prettierrc",
+    "format:fix": "prettier --write . --config config/.prettierrc",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "@typescript-eslint/eslint-plugin": "^8.59.3",
+    "@typescript-eslint/parser": "^8.59.3",
+    "eslint": "^10.3.0",
+    "eslint-config-prettier": "^10.1.8",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.0.4",
+    "prettier": "^3.8.3",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2",
+    "typescript-eslint": "^8.67.0"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "lint-staged": {
+    "*.{ts,tsx}": [
+      "eslint --fix --config config/eslint.config.mjs",
+      "prettier --write --config config/.prettierrc"
+    ]
+  }
+}

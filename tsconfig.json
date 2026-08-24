@@ -1,0 +1,9 @@
+/*
+ *
+ * This file exists only to point VS Code's TypeScript language server to the
+ * actual tsconfig in config/. All real configuration lives there.
+ *
+ */
+{
+  "extends": "./config/tsconfig.json"
+}
