@@ -79,9 +79,9 @@ function is_record(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function is_relay_message_shape(
-  value: Record<string, unknown>,
-): value is { target_device_id: string; payload: unknown } {
+function is_relay_message_shape<T extends Record<string, unknown>>(
+  value: T,
+): value is T & { target_device_id: string; payload: unknown } {
   return typeof value.target_device_id === "string" && "payload" in value;
 }
 
