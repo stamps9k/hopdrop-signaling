@@ -52,7 +52,7 @@
     "ws": "^8.18.0"
   },
   "lint-staged": {
-    "*.{ts,tsx}": [
+    "**/*.mts": [
       "eslint --fix --config config/eslint.config.mjs",
       "prettier --write --config config/.prettierrc"
     ]
