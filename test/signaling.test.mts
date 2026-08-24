@@ -71,21 +71,47 @@ describe("parse_client_message", () => {
     );
   });
 
-  test("parses a join message with no room_code", () => {
-    const result = parse_client_message(JSON.stringify({ type: "join" }));
-    assert.deepEqual(result, { type: "join", room_code: undefined });
+  test("parses a join message with a device_name and no room_code", () => {
+    const result = parse_client_message(
+      JSON.stringify({ type: "join", device_name: "Device A" }),
+    );
+    assert.deepEqual(result, {
+      type: "join",
+      device_name: "Device A",
+      room_code: undefined,
+    });
   });
 
-  test("parses a join message with a room_code", () => {
+  test("parses a join message with a device_name and room_code", () => {
     const result = parse_client_message(
-      JSON.stringify({ type: "join", room_code: "ABC123" }),
+      JSON.stringify({
+        type: "join",
+        device_name: "Device A",
+        room_code: "ABC123",
+      }),
     );
-    assert.deepEqual(result, { type: "join", room_code: "ABC123" });
+    assert.deepEqual(result, {
+      type: "join",
+      device_name: "Device A",
+      room_code: "ABC123",
+    });
+  });
+
+  test("returns null when join has no device_name at all", () => {
+    const result = parse_client_message(JSON.stringify({ type: "join" }));
+    assert.equal(result, null);
+  });
+
+  test("returns null when join's device_name is not a string", () => {
+    const result = parse_client_message(
+      JSON.stringify({ type: "join", device_name: 123 }),
+    );
+    assert.equal(result, null);
   });
 
   test("returns null when join's room_code is not a string", () => {
     const result = parse_client_message(
-      JSON.stringify({ type: "join", room_code: 123 }),
+      JSON.stringify({ type: "join", device_name: "Device A", room_code: 123 }),
     );
     assert.equal(result, null);
   });
@@ -138,19 +164,26 @@ describe("join flow", () => {
     const conn = make_fake_connection();
     const device_id = handle_connection(conn);
 
-    handle_client_message(device_id, JSON.stringify({ type: "join" }));
+    handle_client_message(
+      device_id,
+      JSON.stringify({ type: "join", device_name: "Device A" }),
+    );
 
     assert.equal(conn.messages.length, 1);
     const message = expect_message_type(conn.messages[0], "room-created");
     assert.equal(message.device_id, device_id);
+    assert.equal(message.device_name, "Device A");
     assert.equal(typeof message.room_code, "string");
     assert.equal(get_room_code_for_device(device_id), message.room_code);
   });
 
-  test("a second device joining an existing room gets room-joined with the first device listed as a peer", () => {
+  test("a second device joining an existing room gets room-joined with the first device listed as a peer, including its name", () => {
     const conn_a = make_fake_connection();
     const device_a = handle_connection(conn_a);
-    handle_client_message(device_a, JSON.stringify({ type: "join" }));
+    handle_client_message(
+      device_a,
+      JSON.stringify({ type: "join", device_name: "Device A" }),
+    );
     const room_code = expect_message_type(
       conn_a.messages[0],
       "room-created",
@@ -160,7 +193,7 @@ describe("join flow", () => {
     const device_b = handle_connection(conn_b);
     handle_client_message(
       device_b,
-      JSON.stringify({ type: "join", room_code }),
+      JSON.stringify({ type: "join", device_name: "Device B", room_code }),
     );
 
     assert.equal(conn_b.messages.length, 1);
@@ -170,13 +203,19 @@ describe("join flow", () => {
     );
     assert.equal(joined_message.room_code, room_code);
     assert.equal(joined_message.device_id, device_b);
-    assert.deepEqual(joined_message.peer_device_ids, [device_a]);
+    assert.equal(joined_message.device_name, "Device B");
+    assert.deepEqual(joined_message.peer_devices, [
+      { device_id: device_a, device_name: "Device A" },
+    ]);
   });
 
-  test("existing devices in the room are notified when a new peer joins", () => {
+  test("existing devices in the room are notified when a new peer joins, including its name", () => {
     const conn_a = make_fake_connection();
     const device_a = handle_connection(conn_a);
-    handle_client_message(device_a, JSON.stringify({ type: "join" }));
+    handle_client_message(
+      device_a,
+      JSON.stringify({ type: "join", device_name: "Device A" }),
+    );
     const room_code = expect_message_type(
       conn_a.messages[0],
       "room-created",
@@ -186,7 +225,7 @@ describe("join flow", () => {
     const device_b = handle_connection(conn_b);
     handle_client_message(
       device_b,
-      JSON.stringify({ type: "join", room_code }),
+      JSON.stringify({ type: "join", device_name: "Device B", room_code }),
     );
 
     assert.equal(conn_a.messages.length, 2);
@@ -195,6 +234,7 @@ describe("join flow", () => {
       "peer-joined",
     );
     assert.equal(peer_joined_message.device_id, device_b);
+    assert.equal(peer_joined_message.device_name, "Device B");
   });
 
   test("joining a room code that doesn't exist sends an error", () => {
@@ -203,7 +243,11 @@ describe("join flow", () => {
 
     handle_client_message(
       device_id,
-      JSON.stringify({ type: "join", room_code: "ZZZZZZ" }),
+      JSON.stringify({
+        type: "join",
+        device_name: "Device A",
+        room_code: "ZZZZZZ",
+      }),
     );
 
     assert.equal(conn.messages.length, 1);
@@ -218,18 +262,79 @@ describe("join flow", () => {
     assert.doesNotThrow(() => {
       handle_client_message(
         device_id,
-        JSON.stringify({ type: "join", room_code: 123 }),
+        JSON.stringify({
+          type: "join",
+          device_name: "Device A",
+          room_code: 123,
+        }),
       );
     });
     assert.equal(conn.messages[0].type, "error");
   });
 });
 
-describe("leave flow", () => {
-  test("leaving notifies remaining peers and clears the device's room mapping", () => {
+describe("device name validation and uniqueness", () => {
+  test("rejects an empty device name with a specific error", () => {
+    const conn = make_fake_connection();
+    const device_id = handle_connection(conn);
+
+    handle_client_message(
+      device_id,
+      JSON.stringify({ type: "join", device_name: "" }),
+    );
+
+    assert.equal(conn.messages.length, 1);
+    const message = expect_message_type(conn.messages[0], "error");
+    assert.match(message.message, /between 1 and/);
+    assert.equal(get_room_code_for_device(device_id), undefined);
+  });
+
+  test("rejects a whitespace-only device name", () => {
+    const conn = make_fake_connection();
+    const device_id = handle_connection(conn);
+
+    handle_client_message(
+      device_id,
+      JSON.stringify({ type: "join", device_name: "   " }),
+    );
+
+    assert.equal(conn.messages[0].type, "error");
+    assert.equal(get_room_code_for_device(device_id), undefined);
+  });
+
+  test("rejects a device name over the length limit", () => {
+    const conn = make_fake_connection();
+    const device_id = handle_connection(conn);
+
+    handle_client_message(
+      device_id,
+      JSON.stringify({ type: "join", device_name: "x".repeat(41) }),
+    );
+
+    assert.equal(conn.messages[0].type, "error");
+    assert.equal(get_room_code_for_device(device_id), undefined);
+  });
+
+  test("trims surrounding whitespace from an otherwise-valid name", () => {
+    const conn = make_fake_connection();
+    const device_id = handle_connection(conn);
+
+    handle_client_message(
+      device_id,
+      JSON.stringify({ type: "join", device_name: "  Device A  " }),
+    );
+
+    const message = expect_message_type(conn.messages[0], "room-created");
+    assert.equal(message.device_name, "Device A");
+  });
+
+  test("rejects joining a room under a name already taken there, with a specific error", () => {
     const conn_a = make_fake_connection();
     const device_a = handle_connection(conn_a);
-    handle_client_message(device_a, JSON.stringify({ type: "join" }));
+    handle_client_message(
+      device_a,
+      JSON.stringify({ type: "join", device_name: "Device A" }),
+    );
     const room_code = expect_message_type(
       conn_a.messages[0],
       "room-created",
@@ -239,7 +344,112 @@ describe("leave flow", () => {
     const device_b = handle_connection(conn_b);
     handle_client_message(
       device_b,
-      JSON.stringify({ type: "join", room_code }),
+      JSON.stringify({ type: "join", device_name: "Device A", room_code }),
+    );
+
+    assert.equal(conn_b.messages.length, 1);
+    const message = expect_message_type(conn_b.messages[0], "error");
+    assert.match(message.message, /already taken/);
+    // Rejected device should not be considered a room member.
+    assert.equal(get_room_code_for_device(device_b), undefined);
+  });
+
+  test("rejects a name collision case-insensitively", () => {
+    const conn_a = make_fake_connection();
+    const device_a = handle_connection(conn_a);
+    handle_client_message(
+      device_a,
+      JSON.stringify({ type: "join", device_name: "Device A" }),
+    );
+    const room_code = expect_message_type(
+      conn_a.messages[0],
+      "room-created",
+    ).room_code;
+
+    const conn_b = make_fake_connection();
+    const device_b = handle_connection(conn_b);
+    handle_client_message(
+      device_b,
+      JSON.stringify({ type: "join", device_name: "device a", room_code }),
+    );
+
+    const message = expect_message_type(conn_b.messages[0], "error");
+    assert.match(message.message, /already taken/);
+  });
+
+  test("the same name is allowed again in a room once the original device leaves", () => {
+    const conn_a = make_fake_connection();
+    const device_a = handle_connection(conn_a);
+    handle_client_message(
+      device_a,
+      JSON.stringify({ type: "join", device_name: "Device A" }),
+    );
+    const room_code = expect_message_type(
+      conn_a.messages[0],
+      "room-created",
+    ).room_code;
+
+    // A second device keeps the room alive once device_a leaves - if
+    // device_a were the only member, leaving would delete the room
+    // entirely (existing behavior), leaving nothing for device_c to join.
+    const conn_b = make_fake_connection();
+    const device_b = handle_connection(conn_b);
+    handle_client_message(
+      device_b,
+      JSON.stringify({ type: "join", device_name: "Device B", room_code }),
+    );
+
+    handle_client_message(device_a, JSON.stringify({ type: "leave" }));
+
+    const conn_c = make_fake_connection();
+    const device_c = handle_connection(conn_c);
+    handle_client_message(
+      device_c,
+      JSON.stringify({ type: "join", device_name: "Device A", room_code }),
+    );
+
+    const message = expect_message_type(conn_c.messages[0], "room-joined");
+    assert.equal(message.device_name, "Device A");
+  });
+
+  test("the same name is allowed in two different rooms simultaneously", () => {
+    const conn_a = make_fake_connection();
+    const device_a = handle_connection(conn_a);
+    handle_client_message(
+      device_a,
+      JSON.stringify({ type: "join", device_name: "Device A" }),
+    );
+
+    const conn_b = make_fake_connection();
+    const device_b = handle_connection(conn_b);
+    handle_client_message(
+      device_b,
+      JSON.stringify({ type: "join", device_name: "Device A" }), // separate room
+    );
+
+    expect_message_type(conn_a.messages[0], "room-created");
+    expect_message_type(conn_b.messages[0], "room-created");
+  });
+});
+
+describe("leave flow", () => {
+  test("leaving notifies remaining peers (with the leaver's name) and clears the device's room mapping", () => {
+    const conn_a = make_fake_connection();
+    const device_a = handle_connection(conn_a);
+    handle_client_message(
+      device_a,
+      JSON.stringify({ type: "join", device_name: "Device A" }),
+    );
+    const room_code = expect_message_type(
+      conn_a.messages[0],
+      "room-created",
+    ).room_code;
+
+    const conn_b = make_fake_connection();
+    const device_b = handle_connection(conn_b);
+    handle_client_message(
+      device_b,
+      JSON.stringify({ type: "join", device_name: "Device B", room_code }),
     );
 
     handle_client_message(device_b, JSON.stringify({ type: "leave" }));
@@ -249,6 +459,7 @@ describe("leave flow", () => {
       "peer-left",
     );
     assert.equal(peer_left_message.device_id, device_b);
+    assert.equal(peer_left_message.device_name, "Device B");
     assert.equal(get_room_code_for_device(device_b), undefined);
   });
 
@@ -267,7 +478,10 @@ describe("offer / answer / ice-candidate relay", () => {
   function set_up_paired_room() {
     const conn_a = make_fake_connection();
     const device_a = handle_connection(conn_a);
-    handle_client_message(device_a, JSON.stringify({ type: "join" }));
+    handle_client_message(
+      device_a,
+      JSON.stringify({ type: "join", device_name: "Device A" }),
+    );
     const room_code = expect_message_type(
       conn_a.messages[0],
       "room-created",
@@ -277,7 +491,7 @@ describe("offer / answer / ice-candidate relay", () => {
     const device_b = handle_connection(conn_b);
     handle_client_message(
       device_b,
-      JSON.stringify({ type: "join", room_code }),
+      JSON.stringify({ type: "join", device_name: "Device B", room_code }),
     );
 
     // Clear the join-time messages so relay tests start with a clean slate.
@@ -382,11 +596,17 @@ describe("offer / answer / ice-candidate relay", () => {
   test("rejects a relay between two devices in two different rooms", () => {
     const conn_a = make_fake_connection();
     const device_a = handle_connection(conn_a);
-    handle_client_message(device_a, JSON.stringify({ type: "join" }));
+    handle_client_message(
+      device_a,
+      JSON.stringify({ type: "join", device_name: "Device A" }),
+    );
 
     const conn_b = make_fake_connection();
     const device_b = handle_connection(conn_b);
-    handle_client_message(device_b, JSON.stringify({ type: "join" })); // separate room
+    handle_client_message(
+      device_b,
+      JSON.stringify({ type: "join", device_name: "Device B" }), // separate room
+    );
 
     conn_a.messages.length = 0;
 
@@ -424,10 +644,13 @@ describe("malformed message handling", () => {
 });
 
 describe("handle_disconnect", () => {
-  test("notifies remaining peers in the room", () => {
+  test("notifies remaining peers, including the disconnected device's name", () => {
     const conn_a = make_fake_connection();
     const device_a = handle_connection(conn_a);
-    handle_client_message(device_a, JSON.stringify({ type: "join" }));
+    handle_client_message(
+      device_a,
+      JSON.stringify({ type: "join", device_name: "Device A" }),
+    );
     const room_code = expect_message_type(
       conn_a.messages[0],
       "room-created",
@@ -437,7 +660,7 @@ describe("handle_disconnect", () => {
     const device_b = handle_connection(conn_b);
     handle_client_message(
       device_b,
-      JSON.stringify({ type: "join", room_code }),
+      JSON.stringify({ type: "join", device_name: "Device B", room_code }),
     );
 
     handle_disconnect(device_b);
@@ -447,12 +670,16 @@ describe("handle_disconnect", () => {
       "peer-left",
     );
     assert.equal(peer_left_message.device_id, device_b);
+    assert.equal(peer_left_message.device_name, "Device B");
   });
 
   test("clears the disconnected device's room mapping", () => {
     const conn = make_fake_connection();
     const device_id = handle_connection(conn);
-    handle_client_message(device_id, JSON.stringify({ type: "join" }));
+    handle_client_message(
+      device_id,
+      JSON.stringify({ type: "join", device_name: "Device A" }),
+    );
 
     handle_disconnect(device_id);
 
@@ -469,7 +696,10 @@ describe("handle_disconnect", () => {
   test("a disconnected device's connection no longer receives relayed messages", () => {
     const conn_a = make_fake_connection();
     const device_a = handle_connection(conn_a);
-    handle_client_message(device_a, JSON.stringify({ type: "join" }));
+    handle_client_message(
+      device_a,
+      JSON.stringify({ type: "join", device_name: "Device A" }),
+    );
     const room_code = expect_message_type(
       conn_a.messages[0],
       "room-created",
@@ -479,7 +709,7 @@ describe("handle_disconnect", () => {
     const device_b = handle_connection(conn_b);
     handle_client_message(
       device_b,
-      JSON.stringify({ type: "join", room_code }),
+      JSON.stringify({ type: "join", device_name: "Device B", room_code }),
     );
 
     handle_disconnect(device_b);

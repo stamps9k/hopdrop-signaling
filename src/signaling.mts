@@ -4,6 +4,7 @@ import {
   add_device_to_room,
   remove_device_from_room,
   get_devices_in_room,
+  get_device_name,
 } from "./rooms.mjs";
 
 // --- Protocol types -------------------------------------------------------
@@ -15,22 +16,28 @@ import {
 // decoupled from whatever shape the browser's WebRTC APIs produce.
 
 export type ClientMessage =
-  | { type: "join"; room_code?: string }
+  | { type: "join"; device_name: string; room_code?: string }
   | { type: "leave" }
   | { type: "offer"; target_device_id: string; payload: unknown }
   | { type: "answer"; target_device_id: string; payload: unknown }
   | { type: "ice-candidate"; target_device_id: string; payload: unknown };
 
 export type ServerMessage =
-  | { type: "room-created"; room_code: string; device_id: string }
+  | {
+      type: "room-created";
+      room_code: string;
+      device_id: string;
+      device_name: string;
+    }
   | {
       type: "room-joined";
       room_code: string;
       device_id: string;
-      peer_device_ids: string[];
+      device_name: string;
+      peer_devices: { device_id: string; device_name: string }[];
     }
-  | { type: "peer-joined"; device_id: string }
-  | { type: "peer-left"; device_id: string }
+  | { type: "peer-joined"; device_id: string; device_name: string }
+  | { type: "peer-left"; device_id: string; device_name: string }
   | { type: "offer"; from_device_id: string; payload: unknown }
   | { type: "answer"; from_device_id: string; payload: unknown }
   | { type: "ice-candidate"; from_device_id: string; payload: unknown }
@@ -107,6 +114,9 @@ export function parse_client_message(
 
   switch (parsed.type) {
     case "join":
+      if (typeof parsed.device_name !== "string") {
+        return null;
+      }
       if (
         parsed.room_code !== undefined &&
         typeof parsed.room_code !== "string"
@@ -115,6 +125,7 @@ export function parse_client_message(
       }
       return {
         type: "join",
+        device_name: parsed.device_name,
         room_code: parsed.room_code as string | undefined,
       };
 
@@ -150,42 +161,93 @@ function send_to_device(device_id: string, message: ServerMessage): void {
 
 // --- Room join / leave -------------------------------------------------
 
-function handle_join(device_id: string, room_code?: string): void {
+// Keeps a device name to a sane, displayable length. Mirrored on the
+// client side (e.g. an input maxlength) for UX feedback before hitting
+// this server-side check, but this is the actual enforcement point.
+const MAX_DEVICE_NAME_LENGTH = 40;
+
+/**
+ * Trims a raw device name and validates it's non-empty and within the
+ * length limit. Returns null for anything that fails - callers should
+ * treat null as "reject with a specific error", distinct from
+ * parse_client_message's null (which means "malformed shape entirely").
+ */
+function normalize_device_name(raw_device_name: string): string | null {
+  const trimmed = raw_device_name.trim();
+  if (trimmed.length === 0 || trimmed.length > MAX_DEVICE_NAME_LENGTH) {
+    return null;
+  }
+  return trimmed;
+}
+
+function handle_join(
+  device_id: string,
+  raw_device_name: string,
+  room_code?: string,
+): void {
+  // Single `now` for this whole join, so every rooms.mts call below is
+  // consistent - avoids a (very unlikely, but real) TTL-boundary race from
+  // calling Date.now() separately at each step.
+  const now = Date.now();
+
+  const device_name = normalize_device_name(raw_device_name);
+  if (device_name === null) {
+    send_to_device(device_id, {
+      type: "error",
+      message: `device name must be between 1 and ${MAX_DEVICE_NAME_LENGTH} characters`,
+    });
+    return;
+  }
+
   if (room_code === undefined) {
-    const new_room_code = create_room(device_id);
+    const new_room_code = create_room(device_id, device_name, now);
     device_room_codes.set(device_id, new_room_code);
     send_to_device(device_id, {
       type: "room-created",
       room_code: new_room_code,
       device_id,
+      device_name,
     });
     return;
   }
 
-  const joined = add_device_to_room(room_code, device_id);
-  if (!joined) {
-    send_to_device(device_id, {
-      type: "error",
-      message: `room ${room_code} does not exist or has expired`,
-    });
+  const result = add_device_to_room(room_code, device_id, device_name, now);
+  if (!result.ok) {
+    const message =
+      result.reason === "name_taken"
+        ? `the name "${device_name}" is already taken in this room — choose a different name`
+        : `room ${room_code} does not exist or has expired`;
+    send_to_device(device_id, { type: "error", message });
     return;
   }
 
   device_room_codes.set(device_id, room_code);
 
-  const peer_device_ids = get_devices_in_room(room_code).filter(
+  const peer_device_ids = get_devices_in_room(room_code, now).filter(
     (id) => id !== device_id,
   );
+  const peer_devices = peer_device_ids.map((peer_device_id) => ({
+    device_id: peer_device_id,
+    // Defensive fallback only - every id here came from this same room's
+    // live device list moments ago, so a lookup miss shouldn't happen in
+    // practice.
+    device_name: get_device_name(room_code, peer_device_id, now) ?? "",
+  }));
 
   send_to_device(device_id, {
     type: "room-joined",
     room_code,
     device_id,
-    peer_device_ids,
+    device_name,
+    peer_devices,
   });
 
   for (const peer_device_id of peer_device_ids) {
-    send_to_device(peer_device_id, { type: "peer-joined", device_id });
+    send_to_device(peer_device_id, {
+      type: "peer-joined",
+      device_id,
+      device_name,
+    });
   }
 }
 
@@ -195,6 +257,10 @@ function leave_current_room(device_id: string): void {
     return;
   }
 
+  // Captured before removal - once remove_device_from_room runs, this
+  // device's name is gone from room state and peer-left couldn't include it.
+  const device_name = get_device_name(room_code, device_id) ?? "";
+
   const remaining_peers_before = get_devices_in_room(room_code).filter(
     (id) => id !== device_id,
   );
@@ -203,7 +269,11 @@ function leave_current_room(device_id: string): void {
   device_room_codes.delete(device_id);
 
   for (const peer_device_id of remaining_peers_before) {
-    send_to_device(peer_device_id, { type: "peer-left", device_id });
+    send_to_device(peer_device_id, {
+      type: "peer-left",
+      device_id,
+      device_name,
+    });
   }
 }
 
@@ -257,7 +327,7 @@ export function handle_client_message(
 
   switch (message.type) {
     case "join":
-      handle_join(device_id, message.room_code);
+      handle_join(device_id, message.device_name, message.room_code);
       return;
     case "leave":
       leave_current_room(device_id);

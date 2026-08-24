@@ -5,6 +5,7 @@ import {
   add_device_to_room,
   remove_device_from_room,
   get_devices_in_room,
+  get_device_name,
   room_exists,
   cleanup_expired_rooms,
   start_room_cleanup,
@@ -23,70 +24,207 @@ beforeEach(() => {
 
 describe("create_room", () => {
   test("creates a room and adds the first device to it", () => {
-    const room_code = create_room("device-A", BASE_TIME);
+    const room_code = create_room("device-A", "Name A", BASE_TIME);
     assert.equal(room_exists(room_code, BASE_TIME), true);
     assert.deepEqual(get_devices_in_room(room_code, BASE_TIME), ["device-A"]);
   });
 
+  test("stores the first device's name", () => {
+    const room_code = create_room("device-A", "Name A", BASE_TIME);
+    assert.equal(get_device_name(room_code, "device-A", BASE_TIME), "Name A");
+  });
+
   test("generates a well-formed room code", () => {
-    const room_code = create_room("device-A", BASE_TIME);
+    const room_code = create_room("device-A", "Name A", BASE_TIME);
     assert.equal(room_code.length, 6);
   });
 
   test("generates distinct codes for distinct rooms", () => {
-    const code_a = create_room("device-A", BASE_TIME);
-    const code_b = create_room("device-B", BASE_TIME);
+    const code_a = create_room("device-A", "Name A", BASE_TIME);
+    const code_b = create_room("device-B", "Name B", BASE_TIME);
     assert.notEqual(code_a, code_b);
   });
 });
 
 describe("add_device_to_room", () => {
   test("adds a second device to an existing room", () => {
-    const room_code = create_room("device-A", BASE_TIME);
-    const joined = add_device_to_room(room_code, "device-B", BASE_TIME);
-    assert.equal(joined, true);
+    const room_code = create_room("device-A", "Name A", BASE_TIME);
+    const result = add_device_to_room(
+      room_code,
+      "device-B",
+      "Name B",
+      BASE_TIME,
+    );
+    assert.equal(result.ok, true);
     assert.deepEqual(get_devices_in_room(room_code, BASE_TIME).sort(), [
       "device-A",
       "device-B",
     ]);
   });
 
+  test("stores the joining device's name", () => {
+    const room_code = create_room("device-A", "Name A", BASE_TIME);
+    add_device_to_room(room_code, "device-B", "Name B", BASE_TIME);
+    assert.equal(get_device_name(room_code, "device-B", BASE_TIME), "Name B");
+  });
+
   test("rejects a join to a room that doesn't exist", () => {
-    const joined = add_device_to_room("ZZZZZZ", "device-B", BASE_TIME);
-    assert.equal(joined, false);
+    const result = add_device_to_room(
+      "ZZZZZZ",
+      "device-B",
+      "Name B",
+      BASE_TIME,
+    );
+    assert.equal(result.ok, false);
+    assert.equal(!result.ok && result.reason, "room_not_found");
   });
 
   test("rejects a malformed room code", () => {
-    const joined = add_device_to_room("bad", "device-B", BASE_TIME);
-    assert.equal(joined, false);
+    const result = add_device_to_room("bad", "device-B", "Name B", BASE_TIME);
+    assert.equal(result.ok, false);
+    assert.equal(!result.ok && result.reason, "room_not_found");
   });
 
   test("rejects a join to a room that has already expired", () => {
-    const room_code = create_room("device-A", BASE_TIME);
+    const room_code = create_room("device-A", "Name A", BASE_TIME);
     const after_expiry = BASE_TIME + ROOM_TTL_MS + 1;
-    const joined = add_device_to_room(room_code, "device-B", after_expiry);
-    assert.equal(joined, false);
+    const result = add_device_to_room(
+      room_code,
+      "device-B",
+      "Name B",
+      after_expiry,
+    );
+    assert.equal(result.ok, false);
+    assert.equal(!result.ok && result.reason, "room_not_found");
   });
 
   test("refreshes the room's TTL on join", () => {
-    const room_code = create_room("device-A", BASE_TIME);
+    const room_code = create_room("device-A", "Name A", BASE_TIME);
 
     // Join just before the original TTL would have expired.
     const just_before_expiry = BASE_TIME + ROOM_TTL_MS - 1;
-    const joined = add_device_to_room(room_code, "device-B", just_before_expiry);
-    assert.equal(joined, true);
+    const result = add_device_to_room(
+      room_code,
+      "device-B",
+      "Name B",
+      just_before_expiry,
+    );
+    assert.equal(result.ok, true);
 
     // Room should still be alive past the *original* expiry point, since
     // joining should have pushed expires_at forward from just_before_expiry.
     const past_original_expiry = BASE_TIME + ROOM_TTL_MS + 1;
     assert.equal(room_exists(room_code, past_original_expiry), true);
   });
+
+  describe("name uniqueness", () => {
+    test("rejects an exact-duplicate name already in the room", () => {
+      const room_code = create_room("device-A", "Sam's Laptop", BASE_TIME);
+      const result = add_device_to_room(
+        room_code,
+        "device-B",
+        "Sam's Laptop",
+        BASE_TIME,
+      );
+      assert.equal(result.ok, false);
+      assert.equal(!result.ok && result.reason, "name_taken");
+      // Rejected device should not have been added.
+      assert.deepEqual(get_devices_in_room(room_code, BASE_TIME), ["device-A"]);
+    });
+
+    test("rejects a name differing only by case", () => {
+      const room_code = create_room("device-A", "Sam's Laptop", BASE_TIME);
+      const result = add_device_to_room(
+        room_code,
+        "device-B",
+        "sam's laptop",
+        BASE_TIME,
+      );
+      assert.equal(result.ok, false);
+      assert.equal(!result.ok && result.reason, "name_taken");
+    });
+
+    test("rejects a name differing only by surrounding whitespace", () => {
+      const room_code = create_room("device-A", "Sam's Laptop", BASE_TIME);
+      const result = add_device_to_room(
+        room_code,
+        "device-B",
+        "  Sam's Laptop  ",
+        BASE_TIME,
+      );
+      assert.equal(result.ok, false);
+      assert.equal(!result.ok && result.reason, "name_taken");
+    });
+
+    test("allows the same name in two different rooms", () => {
+      const room_a = create_room("device-A", "Same Name", BASE_TIME);
+      const room_b = create_room("device-C", "Other", BASE_TIME);
+      const result = add_device_to_room(
+        room_b,
+        "device-D",
+        "Same Name",
+        BASE_TIME,
+      );
+      assert.equal(result.ok, true);
+      // Sanity: room_a untouched by the room_b join.
+      assert.deepEqual(get_devices_in_room(room_a, BASE_TIME), ["device-A"]);
+    });
+
+    test("allows distinct names in the same room", () => {
+      const room_code = create_room("device-A", "Name A", BASE_TIME);
+      const result = add_device_to_room(
+        room_code,
+        "device-B",
+        "Name B",
+        BASE_TIME,
+      );
+      assert.equal(result.ok, true);
+    });
+  });
+});
+
+describe("get_device_name", () => {
+  test("returns the device's stored name", () => {
+    const room_code = create_room("device-A", "Name A", BASE_TIME);
+    assert.equal(get_device_name(room_code, "device-A", BASE_TIME), "Name A");
+  });
+
+  test("returns undefined for a room that doesn't exist", () => {
+    assert.equal(get_device_name("ZZZZZZ", "device-A", BASE_TIME), undefined);
+  });
+
+  test("returns undefined for a device not in the room", () => {
+    const room_code = create_room("device-A", "Name A", BASE_TIME);
+    assert.equal(
+      get_device_name(room_code, "device-not-present", BASE_TIME),
+      undefined,
+    );
+  });
+
+  test("returns undefined for a room that has expired", () => {
+    const room_code = create_room("device-A", "Name A", BASE_TIME);
+    const after_expiry = BASE_TIME + ROOM_TTL_MS + 1;
+    assert.equal(
+      get_device_name(room_code, "device-A", after_expiry),
+      undefined,
+    );
+  });
+
+  test("does not itself refresh the room's TTL", () => {
+    const room_code = create_room("device-A", "Name A", BASE_TIME);
+    const just_before_expiry = BASE_TIME + ROOM_TTL_MS - 1;
+
+    get_device_name(room_code, "device-A", just_before_expiry);
+
+    const after_original_expiry = BASE_TIME + ROOM_TTL_MS + 1;
+    assert.equal(room_exists(room_code, after_original_expiry), false);
+  });
 });
 
 describe("remove_device_from_room", () => {
   test("removes a device but keeps the room alive if others remain", () => {
-    const room_code = create_room("device-A", BASE_TIME);
-    add_device_to_room(room_code, "device-B", BASE_TIME);
+    const room_code = create_room("device-A", "Name A", BASE_TIME);
+    add_device_to_room(room_code, "device-B", "Name B", BASE_TIME);
 
     remove_device_from_room(room_code, "device-A");
 
@@ -94,8 +232,27 @@ describe("remove_device_from_room", () => {
     assert.deepEqual(get_devices_in_room(room_code, BASE_TIME), ["device-B"]);
   });
 
+  test("frees up the removed device's name for reuse in the same still-alive room", () => {
+    const room_code = create_room("device-A", "Name A", BASE_TIME);
+    // A second device keeps the room alive once device-A is removed -
+    // otherwise the room would be deleted outright (existing behavior),
+    // leaving nothing to test the "freed name, same room" claim against.
+    add_device_to_room(room_code, "device-B", "Name B", BASE_TIME);
+
+    remove_device_from_room(room_code, "device-A");
+
+    const result = add_device_to_room(
+      room_code,
+      "device-C",
+      "Name A",
+      BASE_TIME,
+    );
+    assert.equal(result.ok, true);
+    assert.equal(get_device_name(room_code, "device-C", BASE_TIME), "Name A");
+  });
+
   test("deletes the room once the last device leaves", () => {
-    const room_code = create_room("device-A", BASE_TIME);
+    const room_code = create_room("device-A", "Name A", BASE_TIME);
     remove_device_from_room(room_code, "device-A");
     assert.equal(room_exists(room_code, BASE_TIME), false);
   });
@@ -105,7 +262,7 @@ describe("remove_device_from_room", () => {
   });
 
   test("is a no-op for a device that isn't in the room", () => {
-    const room_code = create_room("device-A", BASE_TIME);
+    const room_code = create_room("device-A", "Name A", BASE_TIME);
     remove_device_from_room(room_code, "device-not-present");
     // Room should be unaffected: still exists, original device still in it.
     assert.equal(room_exists(room_code, BASE_TIME), true);
@@ -119,13 +276,13 @@ describe("get_devices_in_room", () => {
   });
 
   test("returns an empty array for a room that has expired", () => {
-    const room_code = create_room("device-A", BASE_TIME);
+    const room_code = create_room("device-A", "Name A", BASE_TIME);
     const after_expiry = BASE_TIME + ROOM_TTL_MS + 1;
     assert.deepEqual(get_devices_in_room(room_code, after_expiry), []);
   });
 
   test("does not itself refresh the room's TTL", () => {
-    const room_code = create_room("device-A", BASE_TIME);
+    const room_code = create_room("device-A", "Name A", BASE_TIME);
     const just_before_expiry = BASE_TIME + ROOM_TTL_MS - 1;
 
     // Merely reading devices should NOT count as activity.
@@ -142,7 +299,7 @@ describe("room_exists", () => {
   });
 
   test("returns true up to and excluding the exact expiry timestamp", () => {
-    const room_code = create_room("device-A", BASE_TIME);
+    const room_code = create_room("device-A", "Name A", BASE_TIME);
     const exact_expiry = BASE_TIME + ROOM_TTL_MS;
     assert.equal(room_exists(room_code, exact_expiry - 1), true);
     assert.equal(room_exists(room_code, exact_expiry), false);
@@ -151,9 +308,9 @@ describe("room_exists", () => {
 
 describe("cleanup_expired_rooms", () => {
   test("removes only expired rooms, leaving live rooms untouched", () => {
-    const expiring_room = create_room("device-A", BASE_TIME);
+    const expiring_room = create_room("device-A", "Name A", BASE_TIME);
     const later_time = BASE_TIME + ROOM_TTL_MS - 1000;
-    const live_room = create_room("device-B", later_time);
+    const live_room = create_room("device-B", "Name B", later_time);
 
     const sweep_time = BASE_TIME + ROOM_TTL_MS + 1;
     const removed_count = cleanup_expired_rooms(sweep_time);
@@ -164,7 +321,7 @@ describe("cleanup_expired_rooms", () => {
   });
 
   test("returns 0 when nothing is expired", () => {
-    create_room("device-A", BASE_TIME);
+    create_room("device-A", "Name A", BASE_TIME);
     const removed_count = cleanup_expired_rooms(BASE_TIME);
     assert.equal(removed_count, 0);
   });
