@@ -325,7 +325,7 @@ function handle_relay(
 // JS string in the first place. Measured in UTF-16 code units (raw
 // string .length), not exact UTF-8 byte count - close enough for a
 // safety margin, not meant to be byte-precise.
-const MAX_RAW_MESSAGE_LENGTH = 64 * 1024;
+export const MAX_RAW_MESSAGE_LENGTH = 64 * 1024;
 
 export function handle_client_message(
   device_id: string,
