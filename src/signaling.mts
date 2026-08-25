@@ -315,10 +315,30 @@ function handle_relay(
  * the main entry point index.mts should call from its WebSocket 'message'
  * handler.
  */
+// Rejects a raw message before any parsing is attempted if it's larger
+// than any legitimate message should be. SDP offers/answers and ICE
+// candidates are typically a few KB at most; this leaves generous
+// headroom while bounding the worst case. This is app-level
+// defense-in-depth, not a replacement for a `maxPayload` limit at the
+// WebSocket server/library level - that's the primary defense, since it
+// can reject an oversized frame before it's ever fully buffered into a
+// JS string in the first place. Measured in UTF-16 code units (raw
+// string .length), not exact UTF-8 byte count - close enough for a
+// safety margin, not meant to be byte-precise.
+const MAX_RAW_MESSAGE_LENGTH = 64 * 1024;
+
 export function handle_client_message(
   device_id: string,
   raw_message: string,
 ): void {
+  if (raw_message.length > MAX_RAW_MESSAGE_LENGTH) {
+    send_to_device(device_id, {
+      type: "error",
+      message: `message too large (max ${MAX_RAW_MESSAGE_LENGTH} characters)`,
+    });
+    return;
+  }
+
   const message = parse_client_message(raw_message);
   if (!message) {
     send_to_device(device_id, { type: "error", message: "malformed message" });

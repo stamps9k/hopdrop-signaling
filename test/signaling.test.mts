@@ -641,6 +641,36 @@ describe("malformed message handling", () => {
 
     assert.equal(conn.messages[0].type, "error");
   });
+
+  test("rejects a raw message over the size limit with a specific error, without attempting to parse it", () => {
+    const conn = make_fake_connection();
+    const device_id = handle_connection(conn);
+
+    // Oversized but otherwise well-formed JSON - if the size guard weren't
+    // firing first, this would parse fine and hit "malformed message" or
+    // succeed, not the size-specific error.
+    const oversized = JSON.stringify({
+      type: "join",
+      device_name: "x".repeat(100_000),
+    });
+
+    handle_client_message(device_id, oversized);
+
+    assert.equal(conn.messages.length, 1);
+    const message = conn.messages[0];
+    assert.equal(message.type, "error");
+    assert.match((message as { message: string }).message, /too large/);
+  });
+
+  test("a normal-sized message is unaffected by the size guard", () => {
+    const conn = make_fake_connection();
+    const device_id = handle_connection(conn);
+
+    const raw = JSON.stringify({ type: "join", device_name: "Device A" });
+
+    assert.doesNotThrow(() => handle_client_message(device_id, raw));
+    assert.equal(conn.messages[0].type, "room-created");
+  });
 });
 
 describe("handle_disconnect", () => {
