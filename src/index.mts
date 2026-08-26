@@ -15,7 +15,7 @@ import {
   stop_rate_limit_cleanup,
 } from "./rate_limit.mjs";
 
-const PORT = Number(process.env.PORT ?? 3000);
+const PORT = Number(process.env.PORT ?? 7420);
 
 // Comma-separated list of origins hopdrop-client is actually served from,
 // e.g. "https://hopdrop.example.com". Fails closed (rejects every
