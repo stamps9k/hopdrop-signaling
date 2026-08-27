@@ -313,22 +313,49 @@ describe("cleanup_expired_rooms", () => {
     const live_room = create_room("device-B", "Name B", later_time);
 
     const sweep_time = BASE_TIME + ROOM_TTL_MS + 1;
-    const removed_count = cleanup_expired_rooms(sweep_time);
+    const evicted_rooms = cleanup_expired_rooms(sweep_time);
 
-    assert.equal(removed_count, 1);
+    assert.equal(evicted_rooms.length, 1);
+    assert.equal(evicted_rooms[0].room_code, expiring_room);
     assert.equal(room_exists(expiring_room, sweep_time), false);
     assert.equal(room_exists(live_room, sweep_time), true);
   });
 
-  test("returns 0 when nothing is expired", () => {
-    create_room("device-A", "Name A", BASE_TIME);
-    const removed_count = cleanup_expired_rooms(BASE_TIME);
-    assert.equal(removed_count, 0);
+  test("includes the device ids that were in each evicted room", () => {
+    const room_code = create_room("device-A", "Name A", BASE_TIME);
+    add_device_to_room(room_code, "device-B", "Name B", BASE_TIME);
+
+    const sweep_time = BASE_TIME + ROOM_TTL_MS + 1;
+    const evicted_rooms = cleanup_expired_rooms(sweep_time);
+
+    assert.equal(evicted_rooms.length, 1);
+    assert.deepEqual(evicted_rooms[0].device_ids.sort(), [
+      "device-A",
+      "device-B",
+    ]);
   });
 
-  test("returns 0 when there are no rooms at all", () => {
-    const removed_count = cleanup_expired_rooms(BASE_TIME);
-    assert.equal(removed_count, 0);
+  test("returns one entry per evicted room when multiple rooms expire in the same sweep", () => {
+    const room_a = create_room("device-A", "Name A", BASE_TIME);
+    const room_b = create_room("device-B", "Name B", BASE_TIME);
+
+    const sweep_time = BASE_TIME + ROOM_TTL_MS + 1;
+    const evicted_rooms = cleanup_expired_rooms(sweep_time);
+
+    assert.equal(evicted_rooms.length, 2);
+    const evicted_codes = evicted_rooms.map((room) => room.room_code).sort();
+    assert.deepEqual(evicted_codes, [room_a, room_b].sort());
+  });
+
+  test("returns an empty array when nothing is expired", () => {
+    create_room("device-A", "Name A", BASE_TIME);
+    const evicted_rooms = cleanup_expired_rooms(BASE_TIME);
+    assert.deepEqual(evicted_rooms, []);
+  });
+
+  test("returns an empty array when there are no rooms at all", () => {
+    const evicted_rooms = cleanup_expired_rooms(BASE_TIME);
+    assert.deepEqual(evicted_rooms, []);
   });
 });
 
@@ -353,5 +380,16 @@ describe("start_room_cleanup / stop_room_cleanup", () => {
 
   test("stop is safe to call when never started", () => {
     assert.doesNotThrow(() => stop_room_cleanup());
+  });
+
+  test("accepts an on_rooms_expired callback without throwing", () => {
+    // Same limitation as above: CLEANUP_INTERVAL_MS is a real 30s
+    // interval, so we can't assert the callback actually fires here
+    // without a fake-timer library, which this project deliberately
+    // avoids. This just confirms the optional param is wired up safely.
+    assert.doesNotThrow(() => {
+      start_room_cleanup(() => {});
+      stop_room_cleanup();
+    });
   });
 });

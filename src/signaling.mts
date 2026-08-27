@@ -5,6 +5,7 @@ import {
   remove_device_from_room,
   get_devices_in_room,
   get_device_name,
+  type EvictedRoom,
 } from "./rooms.mjs";
 
 // --- Protocol types -------------------------------------------------------
@@ -38,6 +39,7 @@ export type ServerMessage =
     }
   | { type: "peer-joined"; device_id: string; device_name: string }
   | { type: "peer-left"; device_id: string; device_name: string }
+  | { type: "room-expired"; room_code: string }
   | { type: "offer"; from_device_id: string; payload: unknown }
   | { type: "answer"; from_device_id: string; payload: unknown }
   | { type: "ice-candidate"; from_device_id: string; payload: unknown }
@@ -274,6 +276,27 @@ function leave_current_room(device_id: string): void {
       device_id,
       device_name,
     });
+  }
+}
+
+// --- Room expiry notification -------------------------------------------
+
+/**
+ * Notifies every device that was in an expired room, and forgets those
+ * devices' room mapping so a stray leave/relay afterward doesn't
+ * reference a room that no longer exists. Deliberately does not close the
+ * device's connection — the socket stays open so the device can create or
+ * join a new room immediately without reconnecting. Intended to be passed
+ * as the `on_rooms_expired` callback to rooms.mts's start_room_cleanup;
+ * this is the seam where room-expiry state becomes an actual message on a
+ * socket, since rooms.mts has no notion of connections.
+ */
+export function notify_rooms_expired(evicted_rooms: EvictedRoom[]): void {
+  for (const { room_code, device_ids } of evicted_rooms) {
+    for (const device_id of device_ids) {
+      send_to_device(device_id, { type: "room-expired", room_code });
+      device_room_codes.delete(device_id);
+    }
   }
 }
 

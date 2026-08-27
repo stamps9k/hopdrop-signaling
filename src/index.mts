@@ -4,6 +4,7 @@ import {
   handle_connection,
   handle_client_message,
   handle_disconnect,
+  notify_rooms_expired,
   MAX_RAW_MESSAGE_LENGTH,
 } from "./signaling.mjs";
 import { start_room_cleanup, stop_room_cleanup } from "./rooms.mjs";
@@ -131,7 +132,7 @@ websocket_server.on("connection", (socket: WebSocket, req) => {
   });
 });
 
-start_room_cleanup();
+start_room_cleanup(notify_rooms_expired);
 start_rate_limit_cleanup();
 
 http_server.listen(PORT, () => {

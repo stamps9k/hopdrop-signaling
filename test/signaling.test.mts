@@ -6,6 +6,7 @@ import {
   handle_disconnect,
   parse_client_message,
   get_room_code_for_device,
+  notify_rooms_expired,
   clear_all_signaling_state,
 } from "../src/signaling.mjs";
 import type { ServerMessage } from "../src/signaling.mjs";
@@ -758,5 +759,96 @@ describe("handle_disconnect", () => {
     );
 
     assert.equal(conn_b.messages.length, 0);
+  });
+});
+
+describe("notify_rooms_expired", () => {
+  test("sends room-expired to every device listed in an evicted room", () => {
+    const conn_a = make_fake_connection();
+    const device_a = handle_connection(conn_a);
+    const conn_b = make_fake_connection();
+    const device_b = handle_connection(conn_b);
+
+    notify_rooms_expired([
+      { room_code: "ABC123", device_ids: [device_a, device_b] },
+    ]);
+
+    assert.equal(conn_a.messages.length, 1);
+    assert.equal(conn_b.messages.length, 1);
+    assert.equal(
+      expect_message_type(conn_a.messages[0], "room-expired").room_code,
+      "ABC123",
+    );
+    assert.equal(
+      expect_message_type(conn_b.messages[0], "room-expired").room_code,
+      "ABC123",
+    );
+  });
+
+  test("clears the room mapping for every notified device", () => {
+    const conn = make_fake_connection();
+    const device_id = handle_connection(conn);
+    handle_client_message(
+      device_id,
+      JSON.stringify({ type: "join", device_name: "Device A" }),
+    );
+    const room_code = expect_message_type(
+      conn.messages[0],
+      "room-created",
+    ).room_code;
+
+    notify_rooms_expired([{ room_code, device_ids: [device_id] }]);
+
+    assert.equal(get_room_code_for_device(device_id), undefined);
+  });
+
+  test("does not close or otherwise disturb the device's connection", () => {
+    const conn = make_fake_connection();
+    const device_id = handle_connection(conn);
+
+    notify_rooms_expired([{ room_code: "ABC123", device_ids: [device_id] }]);
+
+    // The device should still be reachable for further messages - a
+    // second notification (or any other send) should still land.
+    notify_rooms_expired([{ room_code: "ABC123", device_ids: [device_id] }]);
+    assert.equal(conn.messages.length, 2);
+  });
+
+  test("handles multiple evicted rooms in one call, notifying only the devices in each", () => {
+    const conn_a = make_fake_connection();
+    const device_a = handle_connection(conn_a);
+    const conn_b = make_fake_connection();
+    const device_b = handle_connection(conn_b);
+
+    notify_rooms_expired([
+      { room_code: "ROOM01", device_ids: [device_a] },
+      { room_code: "ROOM02", device_ids: [device_b] },
+    ]);
+
+    assert.equal(conn_a.messages.length, 1);
+    assert.equal(
+      expect_message_type(conn_a.messages[0], "room-expired").room_code,
+      "ROOM01",
+    );
+    assert.equal(conn_b.messages.length, 1);
+    assert.equal(
+      expect_message_type(conn_b.messages[0], "room-expired").room_code,
+      "ROOM02",
+    );
+  });
+
+  test("is a harmless no-op when given an empty list", () => {
+    assert.doesNotThrow(() => notify_rooms_expired([]));
+  });
+
+  test("does not throw when a device id has no live connection", () => {
+    // Simulates a device that disconnected between the sweep capturing
+    // its id and notify_rooms_expired running - send_to_device's existing
+    // not-found handling should just silently skip it.
+    assert.doesNotThrow(() =>
+      notify_rooms_expired([
+        { room_code: "ABC123", device_ids: ["ghost-device-id"] },
+      ]),
+    );
   });
 });

@@ -161,34 +161,57 @@ export function room_exists(
 }
 
 /**
- * Sweeps and deletes all expired rooms. Exported directly (rather than
- * only via the interval) so tests can trigger a deterministic sweep
- * without waiting on real time or timers.
+ * A room that was evicted by cleanup_expired_rooms, along with the device
+ * ids that were in it at the moment of eviction. Captured before deletion
+ * since the room's device list is gone once cleanup removes it - this is
+ * the only way a caller can know who to notify.
  */
-export function cleanup_expired_rooms(now: number = Date.now()): number {
-  let removed_count = 0;
+export interface EvictedRoom {
+  room_code: string;
+  device_ids: string[];
+}
+
+/**
+ * Sweeps and deletes all expired rooms, returning what was evicted so the
+ * caller can notify affected devices. Exported directly (rather than only
+ * via the interval) so tests can trigger a deterministic sweep without
+ * waiting on real time or timers.
+ */
+export function cleanup_expired_rooms(now: number = Date.now()): EvictedRoom[] {
+  const evicted_rooms: EvictedRoom[] = [];
   for (const [room_code, room] of rooms) {
     if (room.expires_at <= now) {
+      evicted_rooms.push({
+        room_code,
+        device_ids: Array.from(room.device_names.keys()),
+      });
       rooms.delete(room_code);
-      removed_count++;
     }
   }
-  return removed_count;
+  return evicted_rooms;
 }
 
 /**
  * Starts the periodic background sweep. Call once at server startup.
- * `unref()` so the timer doesn't keep the Node process alive on its own
- * (e.g. during graceful shutdown or test runs).
+ * `on_rooms_expired`, if provided, is invoked with whatever the sweep
+ * evicted on each run (only when at least one room was evicted) - this
+ * module has no notion of connections, so notifying affected devices is
+ * entirely the caller's responsibility. `unref()` so the timer doesn't
+ * keep the Node process alive on its own (e.g. during graceful shutdown
+ * or test runs).
  */
-export function start_room_cleanup(): void {
+export function start_room_cleanup(
+  on_rooms_expired?: (evicted_rooms: EvictedRoom[]) => void,
+): void {
   if (cleanup_timer) {
     return;
   }
-  cleanup_timer = setInterval(
-    () => cleanup_expired_rooms(),
-    CLEANUP_INTERVAL_MS,
-  );
+  cleanup_timer = setInterval(() => {
+    const evicted_rooms = cleanup_expired_rooms();
+    if (evicted_rooms.length > 0) {
+      on_rooms_expired?.(evicted_rooms);
+    }
+  }, CLEANUP_INTERVAL_MS);
   cleanup_timer.unref();
 }
 
