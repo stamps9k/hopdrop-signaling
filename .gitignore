@@ -144,3 +144,6 @@ vite.config.ts.timestamp-*
 
 # Mac finder DS metadata
 .DS_Store
+
+# All secrets
+secrets/

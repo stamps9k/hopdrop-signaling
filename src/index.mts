@@ -15,8 +15,15 @@ import {
   start_rate_limit_cleanup,
   stop_rate_limit_cleanup,
 } from "./rate_limit.mjs";
+import { load_secret_from_file } from "./secrets.mjs";
 
 const PORT = Number(process.env.PORT ?? 7420);
+
+// Fail fast: load the Metered API key at startup so a missing/misconfigured
+// secret crashes before the server binds a port, rather than surfacing later
+// when the first request_turn_credentials message arrives.
+const metered_api_key = load_secret_from_file("METERED_API_KEY_FILE");
+metered_api_key.charAt(0); //TMP code to supress the lint error that key is unused.
 
 // Comma-separated list of origins hopdrop-client is actually served from,
 // e.g. "https://hopdrop.example.com". Fails closed (rejects every
