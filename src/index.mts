@@ -25,6 +25,14 @@ const PORT = Number(process.env.PORT ?? 7420);
 const metered_api_key = load_secret_from_file("METERED_API_KEY_FILE");
 metered_api_key.charAt(0); //TMP code to supress the lint error that key is unused.
 
+// Fail fast: require the Metered credentials endpoint at startup, same
+// rationale as metered_api_key. Not secret (it's an account subdomain, not
+// a credential), so no file-backed loading — just a plain required env var.
+const metered_credentials_url = process.env.METERED_CREDENTIALS_URL;
+if (!metered_credentials_url) {
+  throw new Error("METERED_CREDENTIALS_URL is required");
+}
+
 // Comma-separated list of origins hopdrop-client is actually served from,
 // e.g. "https://hopdrop.example.com". Fails closed (rejects every
 // browser-origin connection) if unset, rather than silently allowing
