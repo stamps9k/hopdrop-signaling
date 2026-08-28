@@ -7,10 +7,11 @@ import {
   parse_client_message,
   get_room_code_for_device,
   notify_rooms_expired,
+  configure_turn_credentials,
   clear_all_signaling_state,
 } from "../src/signaling.mjs";
 import type { ServerMessage } from "../src/signaling.mjs";
-import { clear_all_rooms } from "../src/rooms.mjs";
+import { clear_all_rooms, evict_room } from "../src/rooms.mjs";
 
 /**
  * A minimal fake satisfying the DeviceConnection interface. Captures every
@@ -38,6 +39,33 @@ function expect_message_type<T extends ServerMessage["type"]>(
 ): Extract<ServerMessage, { type: T }> {
   assert.equal(message.type, type);
   return message as Extract<ServerMessage, { type: T }>;
+}
+
+/**
+ * A promise plus externally-callable resolve/reject, for tests that need
+ * to control exactly when a fake fetch_ice_servers call settles -
+ * request-turn-credentials handling is async, so tests need to observe
+ * state both before and after the fetch resolves.
+ */
+function make_deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+/**
+ * Waits for pending microtasks (promise continuations) to drain -
+ * setImmediate always runs after the current microtask queue is empty,
+ * so this reliably lets an awaited fetch_ice_servers() continuation (the
+ * cache_ice_servers/send_to_device calls after the await) complete before
+ * assertions run.
+ */
+function flush_async(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 // Both rooms.mts and signaling.mts hold module-level state shared across
@@ -80,6 +108,7 @@ describe("parse_client_message", () => {
       type: "join",
       device_name: "Device A",
       room_code: undefined,
+      is_turn: undefined,
     });
   });
 
@@ -95,6 +124,35 @@ describe("parse_client_message", () => {
       type: "join",
       device_name: "Device A",
       room_code: "ABC123",
+      is_turn: undefined,
+    });
+  });
+
+  test("parses a join message with is_turn true", () => {
+    const result = parse_client_message(
+      JSON.stringify({ type: "join", device_name: "Device A", is_turn: true }),
+    );
+    assert.deepEqual(result, {
+      type: "join",
+      device_name: "Device A",
+      room_code: undefined,
+      is_turn: true,
+    });
+  });
+
+  test("parses a join message with is_turn false", () => {
+    const result = parse_client_message(
+      JSON.stringify({
+        type: "join",
+        device_name: "Device A",
+        is_turn: false,
+      }),
+    );
+    assert.deepEqual(result, {
+      type: "join",
+      device_name: "Device A",
+      room_code: undefined,
+      is_turn: false,
     });
   });
 
@@ -113,6 +171,17 @@ describe("parse_client_message", () => {
   test("returns null when join's room_code is not a string", () => {
     const result = parse_client_message(
       JSON.stringify({ type: "join", device_name: "Device A", room_code: 123 }),
+    );
+    assert.equal(result, null);
+  });
+
+  test("returns null when join's is_turn is not a boolean", () => {
+    const result = parse_client_message(
+      JSON.stringify({
+        type: "join",
+        device_name: "Device A",
+        is_turn: "true",
+      }),
     );
     assert.equal(result, null);
   });
@@ -149,6 +218,13 @@ describe("parse_client_message", () => {
       JSON.stringify({ type: "ice-candidate", target_device_id: "device-B" }),
     );
     assert.equal(result, null);
+  });
+
+  test("parses a request-turn-credentials message", () => {
+    const result = parse_client_message(
+      JSON.stringify({ type: "request-turn-credentials" }),
+    );
+    assert.deepEqual(result, { type: "request-turn-credentials" });
   });
 });
 
@@ -430,6 +506,119 @@ describe("device name validation and uniqueness", () => {
 
     expect_message_type(conn_a.messages[0], "room-created");
     expect_message_type(conn_b.messages[0], "room-created");
+  });
+});
+
+describe("is_turn on join", () => {
+  test("room-created echoes is_turn: false when omitted", () => {
+    const conn = make_fake_connection();
+    const device_id = handle_connection(conn);
+
+    handle_client_message(
+      device_id,
+      JSON.stringify({ type: "join", device_name: "Device A" }),
+    );
+
+    const message = expect_message_type(conn.messages[0], "room-created");
+    assert.equal(message.is_turn, false);
+  });
+
+  test("room-created echoes is_turn: true when requested", () => {
+    const conn = make_fake_connection();
+    const device_id = handle_connection(conn);
+
+    handle_client_message(
+      device_id,
+      JSON.stringify({
+        type: "join",
+        device_name: "Device A",
+        is_turn: true,
+      }),
+    );
+
+    const message = expect_message_type(conn.messages[0], "room-created");
+    assert.equal(message.is_turn, true);
+  });
+
+  test("room-joined echoes is_turn: true when the joining device matches an is_turn: true room", () => {
+    const conn_a = make_fake_connection();
+    const device_a = handle_connection(conn_a);
+    handle_client_message(
+      device_a,
+      JSON.stringify({ type: "join", device_name: "Device A", is_turn: true }),
+    );
+    const room_code = expect_message_type(
+      conn_a.messages[0],
+      "room-created",
+    ).room_code;
+
+    const conn_b = make_fake_connection();
+    const device_b = handle_connection(conn_b);
+    handle_client_message(
+      device_b,
+      JSON.stringify({
+        type: "join",
+        device_name: "Device B",
+        room_code,
+        is_turn: true,
+      }),
+    );
+
+    const message = expect_message_type(conn_b.messages[0], "room-joined");
+    assert.equal(message.is_turn, true);
+  });
+
+  test("rejects a join with is_turn: true against an is_turn: false room, with a specific error", () => {
+    const conn_a = make_fake_connection();
+    const device_a = handle_connection(conn_a);
+    handle_client_message(
+      device_a,
+      JSON.stringify({ type: "join", device_name: "Device A" }), // is_turn omitted -> false
+    );
+    const room_code = expect_message_type(
+      conn_a.messages[0],
+      "room-created",
+    ).room_code;
+
+    const conn_b = make_fake_connection();
+    const device_b = handle_connection(conn_b);
+    handle_client_message(
+      device_b,
+      JSON.stringify({
+        type: "join",
+        device_name: "Device B",
+        room_code,
+        is_turn: true,
+      }),
+    );
+
+    assert.equal(conn_b.messages.length, 1);
+    const message = expect_message_type(conn_b.messages[0], "error");
+    assert.match(message.message, /is_turn/);
+    assert.equal(get_room_code_for_device(device_b), undefined);
+  });
+
+  test("rejects a join with is_turn: false (or omitted) against an is_turn: true room", () => {
+    const conn_a = make_fake_connection();
+    const device_a = handle_connection(conn_a);
+    handle_client_message(
+      device_a,
+      JSON.stringify({ type: "join", device_name: "Device A", is_turn: true }),
+    );
+    const room_code = expect_message_type(
+      conn_a.messages[0],
+      "room-created",
+    ).room_code;
+
+    const conn_b = make_fake_connection();
+    const device_b = handle_connection(conn_b);
+    handle_client_message(
+      device_b,
+      JSON.stringify({ type: "join", device_name: "Device B", room_code }),
+    );
+
+    const message = expect_message_type(conn_b.messages[0], "error");
+    assert.match(message.message, /is_turn/);
   });
 });
 
@@ -850,5 +1039,238 @@ describe("notify_rooms_expired", () => {
         { room_code: "ABC123", device_ids: ["ghost-device-id"] },
       ]),
     );
+  });
+});
+
+describe("request-turn-credentials", () => {
+  function join_turn_room(device_name: string) {
+    const conn = make_fake_connection();
+    const device_id = handle_connection(conn);
+    handle_client_message(
+      device_id,
+      JSON.stringify({ type: "join", device_name, is_turn: true }),
+    );
+    const room_code = expect_message_type(
+      conn.messages[0],
+      "room-created",
+    ).room_code;
+    conn.messages.length = 0;
+    return { conn, device_id, room_code };
+  }
+
+  test("sends an error when the device is not currently in a room", () => {
+    const conn = make_fake_connection();
+    const device_id = handle_connection(conn);
+
+    handle_client_message(
+      device_id,
+      JSON.stringify({ type: "request-turn-credentials" }),
+    );
+
+    assert.equal(conn.messages.length, 1);
+    const message = expect_message_type(conn.messages[0], "error");
+    assert.match(message.message, /not currently in a room/);
+  });
+
+  test("sends an error when the device's room is not configured for TURN", () => {
+    const conn = make_fake_connection();
+    const device_id = handle_connection(conn);
+    handle_client_message(
+      device_id,
+      JSON.stringify({ type: "join", device_name: "Device A" }), // is_turn omitted -> false
+    );
+    conn.messages.length = 0;
+
+    handle_client_message(
+      device_id,
+      JSON.stringify({ type: "request-turn-credentials" }),
+    );
+
+    assert.equal(conn.messages.length, 1);
+    const message = expect_message_type(conn.messages[0], "error");
+    assert.match(message.message, /not configured to use TURN/);
+  });
+
+  test("sends an error when the room no longer exists (defensive path)", () => {
+    const { conn, device_id, room_code } = join_turn_room("Device A");
+    // Force the room out of existence without going through
+    // notify_rooms_expired, so device_room_codes still (incorrectly)
+    // points at it - simulates the narrow race this branch guards against.
+    evict_room(room_code);
+
+    handle_client_message(
+      device_id,
+      JSON.stringify({ type: "request-turn-credentials" }),
+    );
+
+    assert.equal(conn.messages.length, 1);
+    const message = expect_message_type(conn.messages[0], "error");
+    assert.match(message.message, /does not exist or has expired/);
+  });
+
+  test("sends an error and closes the room when TURN is enabled but no fetcher has been configured", () => {
+    const {
+      conn: conn_a,
+      device_id: device_a,
+      room_code,
+    } = join_turn_room("Device A");
+    const conn_b = make_fake_connection();
+    const device_b = handle_connection(conn_b);
+    handle_client_message(
+      device_b,
+      JSON.stringify({
+        type: "join",
+        device_name: "Device B",
+        room_code,
+        is_turn: true,
+      }),
+    );
+    conn_a.messages.length = 0;
+    conn_b.messages.length = 0;
+
+    // Deliberately not calling configure_turn_credentials.
+    handle_client_message(
+      device_a,
+      JSON.stringify({ type: "request-turn-credentials" }),
+    );
+
+    // Both devices get room-expired - same as any other room closure -
+    // not just the one that happened to make the request.
+    assert.equal(
+      expect_message_type(conn_a.messages[0], "room-expired").room_code,
+      room_code,
+    );
+    assert.equal(
+      expect_message_type(conn_b.messages[0], "room-expired").room_code,
+      room_code,
+    );
+    assert.equal(get_room_code_for_device(device_a), undefined);
+    assert.equal(get_room_code_for_device(device_b), undefined);
+  });
+
+  test("fetches and sends ice servers on first request, caching them for reuse", async () => {
+    const {
+      conn: conn_a,
+      device_id: device_a,
+      room_code,
+    } = join_turn_room("Device A");
+    const fake_ice_servers = [
+      {
+        urls: "turn:standard.relay.metered.ca:80",
+        username: "u",
+        credential: "p",
+      },
+    ];
+    let call_count = 0;
+    const deferred = make_deferred<unknown>();
+    configure_turn_credentials(() => {
+      call_count++;
+      return deferred.promise;
+    });
+
+    handle_client_message(
+      device_a,
+      JSON.stringify({ type: "request-turn-credentials" }),
+    );
+
+    // Nothing sent yet - the fetch hasn't resolved.
+    assert.equal(conn_a.messages.length, 0);
+
+    deferred.resolve(fake_ice_servers);
+    await flush_async();
+
+    assert.equal(conn_a.messages.length, 1);
+    const message = expect_message_type(conn_a.messages[0], "turn-credentials");
+    assert.deepEqual(message.ice_servers, fake_ice_servers);
+    assert.equal(call_count, 1);
+
+    // A second device joining the same room and requesting credentials
+    // should get the cached value synchronously, without calling the
+    // fetcher again.
+    const conn_b = make_fake_connection();
+    const device_b = handle_connection(conn_b);
+    handle_client_message(
+      device_b,
+      JSON.stringify({
+        type: "join",
+        device_name: "Device B",
+        room_code,
+        is_turn: true,
+      }),
+    );
+    conn_b.messages.length = 0;
+
+    handle_client_message(
+      device_b,
+      JSON.stringify({ type: "request-turn-credentials" }),
+    );
+
+    assert.equal(conn_b.messages.length, 1);
+    const cached_message = expect_message_type(
+      conn_b.messages[0],
+      "turn-credentials",
+    );
+    assert.deepEqual(cached_message.ice_servers, fake_ice_servers);
+    assert.equal(call_count, 1);
+  });
+
+  test("closes the room and notifies every device when the fetch fails", async () => {
+    const {
+      conn: conn_a,
+      device_id: device_a,
+      room_code,
+    } = join_turn_room("Device A");
+    const conn_b = make_fake_connection();
+    const device_b = handle_connection(conn_b);
+    handle_client_message(
+      device_b,
+      JSON.stringify({
+        type: "join",
+        device_name: "Device B",
+        room_code,
+        is_turn: true,
+      }),
+    );
+    conn_a.messages.length = 0;
+    conn_b.messages.length = 0;
+
+    const deferred = make_deferred<unknown>();
+    configure_turn_credentials(() => deferred.promise);
+
+    handle_client_message(
+      device_a,
+      JSON.stringify({ type: "request-turn-credentials" }),
+    );
+
+    deferred.reject(new Error("simulated Metered failure"));
+    await flush_async();
+
+    assert.equal(
+      expect_message_type(conn_a.messages[0], "room-expired").room_code,
+      room_code,
+    );
+    assert.equal(
+      expect_message_type(conn_b.messages[0], "room-expired").room_code,
+      room_code,
+    );
+    assert.equal(get_room_code_for_device(device_a), undefined);
+    assert.equal(get_room_code_for_device(device_b), undefined);
+  });
+
+  test("a rejected fetch does not surface as an unhandled promise rejection", async () => {
+    const { device_id } = join_turn_room("Device A");
+    configure_turn_credentials(() => Promise.reject(new Error("boom")));
+
+    assert.doesNotThrow(() => {
+      handle_client_message(
+        device_id,
+        JSON.stringify({ type: "request-turn-credentials" }),
+      );
+    });
+
+    // Let the rejection's continuation (the internal .catch) run before
+    // the test ends, so a failure here would show up as an unhandled
+    // rejection rather than being silently missed.
+    await flush_async();
   });
 });

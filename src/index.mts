@@ -6,6 +6,7 @@ import {
   handle_disconnect,
   notify_rooms_expired,
   MAX_RAW_MESSAGE_LENGTH,
+  configure_turn_credentials,
 } from "./signaling.mjs";
 import { start_room_cleanup, stop_room_cleanup } from "./rooms.mjs";
 import {
@@ -16,6 +17,7 @@ import {
   stop_rate_limit_cleanup,
 } from "./rate_limit.mjs";
 import { load_secret_from_file } from "./secrets.mjs";
+import { fetch_metered_ice_servers } from "./metered_client.mjs";
 
 const PORT = Number(process.env.PORT ?? 7420);
 
@@ -23,7 +25,6 @@ const PORT = Number(process.env.PORT ?? 7420);
 // secret crashes before the server binds a port, rather than surfacing later
 // when the first request_turn_credentials message arrives.
 const metered_api_key = load_secret_from_file("METERED_API_KEY_FILE");
-metered_api_key.charAt(0); //TMP code to supress the lint error that key is unused.
 
 // Fail fast: require the Metered credentials endpoint at startup, same
 // rationale as metered_api_key. Not secret (it's an account subdomain, not
@@ -32,6 +33,14 @@ const metered_credentials_url = process.env.METERED_CREDENTIALS_URL;
 if (!metered_credentials_url) {
   throw new Error("METERED_CREDENTIALS_URL is required");
 }
+
+// Composition root: signaling.mts knows nothing about Metered - this
+// closure is the one place that connects "mint TURN credentials" to
+// "call Metered specifically." Swapping to self-hosted coturn later means
+// changing only this wiring, not signaling.mts itself.
+configure_turn_credentials(() =>
+  fetch_metered_ice_servers(metered_credentials_url, metered_api_key),
+);
 
 // Comma-separated list of origins hopdrop-client is actually served from,
 // e.g. "https://hopdrop.example.com". Fails closed (rejects every

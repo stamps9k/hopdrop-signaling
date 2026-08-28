@@ -5,6 +5,10 @@ import {
   remove_device_from_room,
   get_devices_in_room,
   get_device_name,
+  get_room_is_turn,
+  get_cached_ice_servers,
+  cache_ice_servers,
+  evict_room,
   type EvictedRoom,
 } from "./rooms.mjs";
 
@@ -17,11 +21,12 @@ import {
 // decoupled from whatever shape the browser's WebRTC APIs produce.
 
 export type ClientMessage =
-  | { type: "join"; device_name: string; room_code?: string }
+  | { type: "join"; device_name: string; room_code?: string; is_turn?: boolean }
   | { type: "leave" }
   | { type: "offer"; target_device_id: string; payload: unknown }
   | { type: "answer"; target_device_id: string; payload: unknown }
-  | { type: "ice-candidate"; target_device_id: string; payload: unknown };
+  | { type: "ice-candidate"; target_device_id: string; payload: unknown }
+  | { type: "request-turn-credentials" };
 
 export type ServerMessage =
   | {
@@ -29,6 +34,7 @@ export type ServerMessage =
       room_code: string;
       device_id: string;
       device_name: string;
+      is_turn: boolean;
     }
   | {
       type: "room-joined";
@@ -36,10 +42,12 @@ export type ServerMessage =
       device_id: string;
       device_name: string;
       peer_devices: { device_id: string; device_name: string }[];
+      is_turn: boolean;
     }
   | { type: "peer-joined"; device_id: string; device_name: string }
   | { type: "peer-left"; device_id: string; device_name: string }
   | { type: "room-expired"; room_code: string }
+  | { type: "turn-credentials"; ice_servers: unknown }
   | { type: "offer"; from_device_id: string; payload: unknown }
   | { type: "answer"; from_device_id: string; payload: unknown }
   | { type: "ice-candidate"; from_device_id: string; payload: unknown }
@@ -59,6 +67,31 @@ export interface DeviceConnection {
 
 const device_connections = new Map<string, DeviceConnection>();
 const device_room_codes = new Map<string, string>();
+
+// --- TURN credential minting -----------------------------------------------
+
+/**
+ * Vendor-agnostic hook for minting TURN credentials - returns whatever
+ * ice_servers value should be forwarded to the client. signaling.mts
+ * deliberately has no knowledge of which provider is behind this (Metered
+ * today, self-hosted coturn potentially later) - index.mts supplies the
+ * actual implementation via configure_turn_credentials, the same shape as
+ * how on_rooms_expired gets wired into rooms.mts's cleanup timer.
+ */
+export type FetchIceServers = () => Promise<unknown>;
+
+let fetch_ice_servers: FetchIceServers | undefined;
+
+/**
+ * Configures the function used to mint TURN credentials when a room's
+ * cache is empty. Call once at server startup. Not calling this at all is
+ * safe as long as no room has is_turn: true - a request-turn-credentials
+ * message against a TURN-enabled room without a configured fetcher is
+ * treated as a failure (closes the room), same as the fetcher throwing.
+ */
+export function configure_turn_credentials(fetcher: FetchIceServers): void {
+  fetch_ice_servers = fetcher;
+}
 
 // --- Connection lifecycle ---------------------------------------------------
 
@@ -125,10 +158,14 @@ export function parse_client_message(
       ) {
         return null;
       }
+      if (parsed.is_turn !== undefined && typeof parsed.is_turn !== "boolean") {
+        return null;
+      }
       return {
         type: "join",
         device_name: parsed.device_name,
         room_code: parsed.room_code as string | undefined,
+        is_turn: parsed.is_turn as boolean | undefined,
       };
 
     case "leave":
@@ -145,6 +182,9 @@ export function parse_client_message(
         target_device_id: parsed.target_device_id,
         payload: parsed.payload,
       };
+
+    case "request-turn-credentials":
+      return { type: "request-turn-credentials" };
 
     default:
       return null;
@@ -186,11 +226,17 @@ function handle_join(
   device_id: string,
   raw_device_name: string,
   room_code?: string,
+  is_turn?: boolean,
 ): void {
   // Single `now` for this whole join, so every rooms.mts call below is
   // consistent - avoids a (very unlikely, but real) TTL-boundary race from
   // calling Date.now() separately at each step.
   const now = Date.now();
+
+  // Absent on the wire means "no TURN enforcement requested" - resolved
+  // to a concrete boolean here so every call below deals with a real
+  // value, not undefined.
+  const resolved_is_turn = is_turn ?? false;
 
   const device_name = normalize_device_name(raw_device_name);
   if (device_name === null) {
@@ -202,23 +248,37 @@ function handle_join(
   }
 
   if (room_code === undefined) {
-    const new_room_code = create_room(device_id, device_name, now);
+    const new_room_code = create_room(
+      device_id,
+      device_name,
+      resolved_is_turn,
+      now,
+    );
     device_room_codes.set(device_id, new_room_code);
     send_to_device(device_id, {
       type: "room-created",
       room_code: new_room_code,
       device_id,
       device_name,
+      is_turn: resolved_is_turn,
     });
     return;
   }
 
-  const result = add_device_to_room(room_code, device_id, device_name, now);
+  const result = add_device_to_room(
+    room_code,
+    device_id,
+    device_name,
+    resolved_is_turn,
+    now,
+  );
   if (!result.ok) {
     const message =
       result.reason === "name_taken"
         ? `the name "${device_name}" is already taken in this room — choose a different name`
-        : `room ${room_code} does not exist or has expired`;
+        : result.reason === "is_turn_mismatch"
+          ? "is_turn does not match room configuration"
+          : `room ${room_code} does not exist or has expired`;
     send_to_device(device_id, { type: "error", message });
     return;
   }
@@ -242,6 +302,9 @@ function handle_join(
     device_id,
     device_name,
     peer_devices,
+    // Guaranteed to equal resolved_is_turn - a mismatch would already
+    // have returned above via the is_turn_mismatch branch.
+    is_turn: resolved_is_turn,
   });
 
   for (const peer_device_id of peer_device_ids) {
@@ -289,7 +352,12 @@ function leave_current_room(device_id: string): void {
  * join a new room immediately without reconnecting. Intended to be passed
  * as the `on_rooms_expired` callback to rooms.mts's start_room_cleanup;
  * this is the seam where room-expiry state becomes an actual message on a
- * socket, since rooms.mts has no notion of connections.
+ * socket, since rooms.mts has no notion of connections. Also reused
+ * directly (via close_room_due_to_turn_failure below, wrapping a single
+ * evict_room result) when a room's upfront TURN credential fetch fails -
+ * same notification shape, different trigger. A future improvement is a
+ * distinct room-closed message with a reason field, so the client can
+ * tell these two cases apart instead of both surfacing as room-expired.
  */
 export function notify_rooms_expired(evicted_rooms: EvictedRoom[]): void {
   for (const { room_code, device_ids } of evicted_rooms) {
@@ -298,6 +366,103 @@ export function notify_rooms_expired(evicted_rooms: EvictedRoom[]): void {
       device_room_codes.delete(device_id);
     }
   }
+}
+
+// --- TURN credential requests -------------------------------------------
+
+/**
+ * Closes a room whose TURN credential fetch failed, reusing the same
+ * eviction + notification path as TTL expiry - room-expired to every
+ * device that was in the room, including whichever device's request
+ * triggered the failure. No role distinction, same as TTL expiry.
+ */
+function close_room_due_to_turn_failure(room_code: string): void {
+  const evicted_room = evict_room(room_code);
+  if (evicted_room) {
+    notify_rooms_expired([evicted_room]);
+  }
+}
+
+/**
+ * Handles a request-turn-credentials message: looks up the requesting
+ * device's room, confirms it's configured for TURN, and serves cached
+ * credentials if present or mints fresh ones otherwise - at most one
+ * mint per room, reused by every device that asks. A failed mint
+ * (fetch_ice_servers rejects, or was never configured) is treated as
+ * fatal to the room, per the "is_turn enforces TURN" design: the room is
+ * evicted and every device in it is notified via room-expired.
+ *
+ * Async because minting involves a network call. handle_client_message
+ * itself stays synchronous - this is fired without awaiting there and
+ * catches its own failures internally, so nothing here becomes an
+ * unhandled rejection.
+ */
+async function handle_request_turn_credentials(
+  device_id: string,
+  now: number = Date.now(),
+): Promise<void> {
+  const room_code = device_room_codes.get(device_id);
+  if (!room_code) {
+    send_to_device(device_id, {
+      type: "error",
+      message: "you are not currently in a room",
+    });
+    return;
+  }
+
+  const room_is_turn = get_room_is_turn(room_code, now);
+  if (room_is_turn === undefined) {
+    send_to_device(device_id, {
+      type: "error",
+      message: `room ${room_code} does not exist or has expired`,
+    });
+    return;
+  }
+  if (!room_is_turn) {
+    send_to_device(device_id, {
+      type: "error",
+      message: `room ${room_code} is not configured to use TURN`,
+    });
+    return;
+  }
+
+  const cached = get_cached_ice_servers(room_code, now);
+  if (cached.ok) {
+    send_to_device(device_id, {
+      type: "turn-credentials",
+      ice_servers: cached.ice_servers,
+    });
+    return;
+  }
+  if (cached.reason === "room_not_found") {
+    // Extremely unlikely given get_room_is_turn just confirmed the room
+    // exists, moments ago and synchronously - handled defensively rather
+    // than assumed impossible.
+    send_to_device(device_id, {
+      type: "error",
+      message: `room ${room_code} does not exist or has expired`,
+    });
+    return;
+  }
+
+  if (!fetch_ice_servers) {
+    // Misconfiguration: an is_turn room exists but index.mts never called
+    // configure_turn_credentials. Enforcing TURN without any way to mint
+    // credentials can't be honored, so the room can't safely continue.
+    close_room_due_to_turn_failure(room_code);
+    return;
+  }
+
+  let ice_servers: unknown;
+  try {
+    ice_servers = await fetch_ice_servers();
+  } catch {
+    close_room_due_to_turn_failure(room_code);
+    return;
+  }
+
+  cache_ice_servers(room_code, ice_servers);
+  send_to_device(device_id, { type: "turn-credentials", ice_servers });
 }
 
 // --- SDP / ICE relay ---------------------------------------------------
@@ -370,7 +535,12 @@ export function handle_client_message(
 
   switch (message.type) {
     case "join":
-      handle_join(device_id, message.device_name, message.room_code);
+      handle_join(
+        device_id,
+        message.device_name,
+        message.room_code,
+        message.is_turn,
+      );
       return;
     case "leave":
       leave_current_room(device_id);
@@ -379,6 +549,15 @@ export function handle_client_message(
     case "answer":
     case "ice-candidate":
       handle_relay(device_id, message);
+      return;
+    case "request-turn-credentials":
+      void handle_request_turn_credentials(device_id).catch(() => {
+        // handle_request_turn_credentials handles its own failures
+        // internally (sending an error, or evicting the room via
+        // close_room_due_to_turn_failure) - this catch exists only to
+        // prevent an unhandled promise rejection, since
+        // handle_client_message itself is synchronous.
+      });
       return;
   }
 }
@@ -396,10 +575,12 @@ export function get_room_code_for_device(
 }
 
 /**
- * Clears all module-level signaling state (connections + room mappings).
- * Test-only helper for resetting state between test files.
+ * Clears all module-level signaling state (connections, room mappings,
+ * and the configured TURN credential fetcher). Test-only helper for
+ * resetting state between test files.
  */
 export function clear_all_signaling_state(): void {
   device_connections.clear();
   device_room_codes.clear();
+  fetch_ice_servers = undefined;
 }
