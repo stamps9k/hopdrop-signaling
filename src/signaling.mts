@@ -11,6 +11,7 @@ import {
   evict_room,
   type EvictedRoom,
 } from "./rooms.mjs";
+import type { IceServer } from "./metered_client.mjs";
 
 // --- Protocol types -------------------------------------------------------
 //
@@ -47,7 +48,7 @@ export type ServerMessage =
   | { type: "peer-joined"; device_id: string; device_name: string }
   | { type: "peer-left"; device_id: string; device_name: string }
   | { type: "room-expired"; room_code: string }
-  | { type: "turn-credentials"; ice_servers: unknown }
+  | { type: "turn-credentials"; ice_servers: IceServer[] }
   | { type: "offer"; from_device_id: string; payload: unknown }
   | { type: "answer"; from_device_id: string; payload: unknown }
   | { type: "ice-candidate"; from_device_id: string; payload: unknown }
@@ -71,14 +72,19 @@ const device_room_codes = new Map<string, string>();
 // --- TURN credential minting -----------------------------------------------
 
 /**
- * Vendor-agnostic hook for minting TURN credentials - returns whatever
- * ice_servers value should be forwarded to the client. signaling.mts
+ * Vendor-agnostic hook for minting TURN credentials - returns the
+ * already-validated ice_servers value to forward to the client (see
+ * metered_client.mts's fetch_metered_ice_servers). signaling.mts
  * deliberately has no knowledge of which provider is behind this (Metered
  * today, self-hosted coturn potentially later) - index.mts supplies the
  * actual implementation via configure_turn_credentials, the same shape as
  * how on_rooms_expired gets wired into rooms.mts's cleanup timer.
+ *
+ * Implementations should ensure any error they throw has a message safe
+ * to log server-side (no secrets, no request URLs) - handle_request_turn_
+ * credentials logs it on failure for diagnostic visibility.
  */
-export type FetchIceServers = () => Promise<unknown>;
+export type FetchIceServers = () => Promise<IceServer[]>;
 
 let fetch_ice_servers: FetchIceServers | undefined;
 
@@ -449,14 +455,30 @@ async function handle_request_turn_credentials(
     // Misconfiguration: an is_turn room exists but index.mts never called
     // configure_turn_credentials. Enforcing TURN without any way to mint
     // credentials can't be honored, so the room can't safely continue.
+    console.error(
+      "request-turn-credentials: no fetcher configured, closing room",
+      room_code,
+    );
     close_room_due_to_turn_failure(room_code);
     return;
   }
 
-  let ice_servers: unknown;
+  let ice_servers: IceServer[];
   try {
     ice_servers = await fetch_ice_servers();
-  } catch {
+  } catch (error) {
+    // Whatever fetch_ice_servers throws is expected to have a message
+    // safe to log (see FetchIceServers' docs above) - metered_client.mts's
+    // TurnCredentialFetchError always does, since its message is a fixed
+    // string with no interpolation of the URL or API key. Logging this is
+    // what would have caught, at the source, the create-vs-get Metered
+    // endpoint mix-up that previously only surfaced client-side as an
+    // opaque parse error, several hops away from the actual cause.
+    console.error(
+      "TURN credential fetch failed, closing room:",
+      room_code,
+      error instanceof Error ? error.message : error,
+    );
     close_room_due_to_turn_failure(room_code);
     return;
   }

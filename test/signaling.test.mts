@@ -12,6 +12,7 @@ import {
 } from "../src/signaling.mjs";
 import type { ServerMessage } from "../src/signaling.mjs";
 import { clear_all_rooms, evict_room } from "../src/rooms.mjs";
+import type { IceServer } from "../src/metered_client.mjs";
 
 /**
  * A minimal fake satisfying the DeviceConnection interface. Captures every
@@ -1154,7 +1155,7 @@ describe("request-turn-credentials", () => {
       device_id: device_a,
       room_code,
     } = join_turn_room("Device A");
-    const fake_ice_servers = [
+    const fake_ice_servers: IceServer[] = [
       {
         urls: "turn:standard.relay.metered.ca:80",
         username: "u",
@@ -1162,7 +1163,7 @@ describe("request-turn-credentials", () => {
       },
     ];
     let call_count = 0;
-    const deferred = make_deferred<unknown>();
+    const deferred = make_deferred<IceServer[]>();
     configure_turn_credentials(() => {
       call_count++;
       return deferred.promise;
@@ -1234,7 +1235,7 @@ describe("request-turn-credentials", () => {
     conn_a.messages.length = 0;
     conn_b.messages.length = 0;
 
-    const deferred = make_deferred<unknown>();
+    const deferred = make_deferred<IceServer[]>();
     configure_turn_credentials(() => deferred.promise);
 
     handle_client_message(

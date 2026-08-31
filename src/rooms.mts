@@ -1,4 +1,5 @@
 import { generate_room_code, is_valid_room_code } from "./room_code.mjs";
+import type { IceServer } from "./metered_client.mjs";
 
 // How long a room stays alive with no activity before it's swept.
 // Rooms exist only long enough for two devices to find each other and
@@ -23,8 +24,11 @@ interface RoomState {
   // room) instead of minting fresh credentials per device. Only ever set
   // on success - a failed fetch is never cached, so the next attempt (by
   // any device) gets a clean retry rather than inheriting a prior
-  // failure.
-  cached_ice_servers?: unknown;
+  // failure. Typed against the validated IceServer[] (see
+  // metered_client.mts's fetch_metered_ice_servers) rather than unknown -
+  // by the time a value reaches this cache, it's already been confirmed
+  // to match the shape the client expects.
+  cached_ice_servers?: IceServer[];
   expires_at: number;
 }
 
@@ -203,7 +207,7 @@ export function get_room_is_turn(
 }
 
 export type CachedIceServersLookup =
-  | { ok: true; ice_servers: unknown }
+  | { ok: true; ice_servers: IceServer[] }
   | { ok: false; reason: "room_not_found" | "not_cached" };
 
 /**
@@ -236,7 +240,7 @@ export function get_cached_ice_servers(
  */
 export function cache_ice_servers(
   room_code: string,
-  ice_servers: unknown,
+  ice_servers: IceServer[],
 ): void {
   const room = rooms.get(room_code);
   if (!room) {

@@ -479,17 +479,19 @@ describe("get_cached_ice_servers / cache_ice_servers", () => {
   test("a later cache_ice_servers call overwrites an earlier cached value", () => {
     const room_code = create_room("device-A", "Name A", true, BASE_TIME);
 
-    cache_ice_servers(room_code, ["first"]);
-    cache_ice_servers(room_code, ["second"]);
+    cache_ice_servers(room_code, [{ urls: "turn:first.example.com" }]);
+    cache_ice_servers(room_code, [{ urls: "turn:second.example.com" }]);
 
     const result = get_cached_ice_servers(room_code, BASE_TIME);
     assert.equal(result.ok, true);
-    assert.deepEqual(result.ok && result.ice_servers, ["second"]);
+    assert.deepEqual(result.ok && result.ice_servers, [
+      { urls: "turn:second.example.com" },
+    ]);
   });
 
   test("caching does not refresh the room's TTL", () => {
     const room_code = create_room("device-A", "Name A", true, BASE_TIME);
-    cache_ice_servers(room_code, ["ignored"]);
+    cache_ice_servers(room_code, [{ urls: "turn:ignored.example.com" }]);
     const after_expiry = BASE_TIME + ROOM_TTL_MS + 1;
     assert.equal(room_exists(room_code, after_expiry), false);
   });
