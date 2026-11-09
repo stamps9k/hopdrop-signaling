@@ -24,14 +24,15 @@
     }
   },
   "scripts": {
-	  "test": "node --import tsx --test test/**/*.test.mts",
+    "test": "node --import tsx --test test/**/*.test.mts",
     "build": "tsc -p config/tsconfig.build.json",
     "dev": "tsx watch src/index.mts",
     "start": "node dist/index.mjs",
     "lint": "eslint . --config config/eslint.config.mjs",
     "format:check": "prettier --check . --config config/.prettierrc",
     "format:fix": "prettier --write . --config config/.prettierrc",
-    "prepare": "husky"
+    "prepare": "husky",
+    "audit:ci": "npx --yes audit-ci@7.1.0 --config audit-ci.jsonc"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -56,5 +57,8 @@
       "eslint --fix --config config/eslint.config.mjs",
       "prettier --write --config config/.prettierrc"
     ]
+  },
+  "overrides": {
+    "minimatch@>=7.0.0 <11.0.1": "^11.0.5"
   }
 }

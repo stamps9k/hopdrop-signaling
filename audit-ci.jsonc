@@ -1,0 +1,8 @@
+{
+  "$schema": "https://github.com/IBM/audit-ci/raw/main/docs/schema.json",
+  // Fail on any advisory, low severity and up.
+  "low": true,
+  // Accepted risks: advisory ID with a comment giving the reason,
+  // date accepted and review to revisit at.
+  "allowlist": []
+}

@@ -1,1 +1,30 @@
 npx lint-staged
+
+# Security audit on dependency changes (kept last: it exits early when no
+# dependency files are staged).
+# Runs audit-ci against the *staged* package.json, package-lock.json and
+# audit-ci.jsonc, only when the commit touches one of them. Exceptions live in
+# audit-ci.jsonc. Bypass in an emergency with: git commit --no-verify
+
+AUDIT_CI="audit-ci@7.1.0"
+
+git diff --cached --name-only | grep -qxE 'package(-lock)?\.json|audit-ci\.jsonc' || exit 0
+
+tmp=$(mktemp -d) || exit 1
+trap 'rm -rf "$tmp"' EXIT
+
+git show :package.json > "$tmp/package.json" || exit 1
+git show :package-lock.json > "$tmp/package-lock.json" 2>/dev/null || {
+  echo "pre-commit: package-lock.json is not staged or tracked; stage it with package.json." >&2
+  exit 1
+}
+git show :audit-ci.jsonc > "$tmp/audit-ci.jsonc" 2>/dev/null || {
+  echo "pre-commit: audit-ci.jsonc is not staged or tracked; stage it too." >&2
+  exit 1
+}
+
+echo "pre-commit: dependency files changed, running $AUDIT_CI..."
+if ! (cd "$tmp" && npx --yes "$AUDIT_CI" --config audit-ci.jsonc --report-type summary); then
+  echo "pre-commit: security audit failed. Fix or allowlist (with a reason) in audit-ci.jsonc." >&2
+  exit 1
+fi
