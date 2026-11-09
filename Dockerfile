@@ -1,7 +1,7 @@
 # --- Build stage -----------------------------------------------------
 # Has TypeScript, tsx, and every devDependency. Discarded after this
 # stage - none of it becomes part of the shipped image.
-FROM node:22-slim AS builder
+FROM node:22-bookworm-slim AS builder
 WORKDIR /app
 
 # Copied separately from the rest of the source so `npm ci` is cached
@@ -23,7 +23,7 @@ RUN npm run build
 # --- Runtime stage -----------------------------------------------------
 # Only what's needed to actually run the compiled output: no compiler,
 # no devDependencies, no source .mts files.
-FROM node:22-slim AS runtime
+FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 
