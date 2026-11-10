@@ -14,7 +14,7 @@
     "type": "git",
     "url": "git+https://github.com/stamps9k/hopdrop-signaling.git"
   },
-  "license": "ISC",
+  "license": "GPL-3.0-or-later",
   "author": "stampatron",
   "type": "module",
   "main": "./dist/index.mjs",
