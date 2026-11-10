@@ -2,5 +2,13 @@
   "tabWidth": 2,
   "useTabs": false,
   "printWidth": 80,
-  "bracketSameLine": true
+  "bracketSameLine": true,
+  "overrides": [
+    {
+      "files": "*.jsonc",
+      "options": {
+        "trailingComma": "none"
+      }
+    }
+  ]
 }
