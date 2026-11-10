@@ -53,10 +53,8 @@
     "ws": "^8.18.0"
   },
   "lint-staged": {
-    "**/*.mts": [
-      "eslint --fix --config config/eslint.config.mjs",
-      "prettier --write --config config/.prettierrc"
-    ]
+    "**/*.mts": "eslint --fix --config config/eslint.config.mjs",
+    "*": "prettier --write --ignore-unknown --config config/.prettierrc"
   },
   "overrides": {
     "minimatch@>=7.0.0 <11.0.1": "^11.0.5"

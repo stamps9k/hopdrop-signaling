@@ -54,4 +54,3 @@ jobs:
           for tag in $TAGS; do
             docker push "$tag"
           done
-

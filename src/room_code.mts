@@ -12,7 +12,9 @@ const DEFAULT_CODE_LENGTH = 6;
  * predicted or brute-forced — room codes are the only thing standing
  * between an attacker and joining a pairing session.
  */
-export function generate_room_code(length: number = DEFAULT_CODE_LENGTH): string {
+export function generate_room_code(
+  length: number = DEFAULT_CODE_LENGTH,
+): string {
   if (length < 1) {
     throw new RangeError(`room code length must be >= 1, got ${length}`);
   }

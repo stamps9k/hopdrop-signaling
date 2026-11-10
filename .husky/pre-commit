@@ -1,4 +1,4 @@
-npx lint-staged
+npx lint-staged --concurrent false
 
 # Security audit on dependency changes (kept last: it exits early when no
 # dependency files are staged).
